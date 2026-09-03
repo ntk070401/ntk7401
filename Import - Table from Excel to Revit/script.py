@@ -14,13 +14,16 @@ view's drawing scale at creation time. (Note: this is a one-time
 scale-correct creation; if you change the view scale afterwards,
 the table will NOT auto-resize - you would need to recreate it.)
 
-TextNote width is constrained to each cell's usable width. Long text
-may wrap inside the cell when it cannot fit on one line.
+TextNote width is measured against the actual rendered width of each
+cell's text (at the chosen Text Note Type's real font/size) so long
+text stays on one line (overflowing past the cell, like Excel) rather
+than wrapping into two lines just because the cell column is narrow.
 
 Falls back to plain tab-separated text (uniform cell size, no merge,
 no alignment) if Excel HTML clipboard data is not available.
 
-Input values are validated before geometry creation.
+Input values are validated before geometry creation, and unavailable fonts
+fall back to Arial for text-width measurement.
 """
 __title__ = "Table\nExcel to Revit"
 
@@ -33,7 +36,7 @@ clr.AddReference('System')
 
 from System import IO
 from System.Net import WebUtility
-from System.Drawing import Point, Size, Font, FontStyle, GraphicsUnit
+from System.Drawing import Point, Size, Font, FontStyle, GraphicsUnit, Bitmap, Graphics
 from System.Windows.Forms import (
     Clipboard, Form, Label as WinLabel, TextBox as WinTextBox,
     ComboBox as WinComboBox, Button as WinButton, DialogResult,
@@ -53,32 +56,15 @@ from pyrevit import forms, revit, script
 doc = revit.doc
 uidoc = revit.uidoc
 view = doc.ActiveView
-output = script.get_output()
 
 INCH_TO_FT = 1.0 / 12.0
 PT_TO_INCH = 1.0 / 72.0
 
-
-def parse_user_float(raw_value, field_name, minimum=None, maximum=None, inclusive_min=True,
-                    inclusive_max=True):
-    """Parse and validate a numeric value entered in the setup dialog."""
-    value_text = str(raw_value).strip().replace(',', '.')
-    try:
-        value = float(value_text)
-    except (TypeError, ValueError):
-        raise ValueError('{} must be a valid number.'.format(field_name))
-
-    if minimum is not None:
-        invalid_min = value < minimum or (not inclusive_min and value == minimum)
-        if invalid_min:
-            comparator = 'greater than' if not inclusive_min else 'at least'
-            raise ValueError('{} must be {} {}.'.format(field_name, comparator, minimum))
-    if maximum is not None:
-        invalid_max = value > maximum or (not inclusive_max and value == maximum)
-        if invalid_max:
-            comparator = 'less than' if not inclusive_max else 'at most'
-            raise ValueError('{} must be {} {}.'.format(field_name, comparator, maximum))
-    return value
+# Fixed defaults for values that used to be manual Table Setup inputs.
+DEFAULT_FALLBACK_WIDTH_IN = 1.0
+DEFAULT_FALLBACK_HEIGHT_IN = 0.3
+DEFAULT_PADDING_PERCENT = 10.0
+BASE_TEXT_SIZE_IN = 3.0 / 32.0  # size-multiplier reference (3/32" text)
 
 
 def inch_to_ft(value_inch):
@@ -90,6 +76,33 @@ def pt_to_ft(value_pt):
     """Convert a point (1/72 inch) value to Revit internal feet."""
     return inch_to_ft(value_pt * PT_TO_INCH)
 
+
+def measure_text_width_ft(text, font_family, point_size, font_style, width_factor):
+    """Estimate one-line rendered width in feet (paper-space).
+
+    If the selected font is unavailable on the machine, use Arial as a
+    conservative fallback instead of aborting table creation.
+    """
+    if not text:
+        return 0.0
+
+    bmp = Bitmap(1, 1)
+    g = Graphics.FromImage(bmp)
+    measure_font = None
+    try:
+        try:
+            measure_font = Font(font_family, point_size, font_style, GraphicsUnit.Point)
+        except Exception:
+            measure_font = Font('Arial', point_size, font_style, GraphicsUnit.Point)
+
+        size = g.MeasureString(text, measure_font)
+        width_inch = (size.Width / g.DpiX) * width_factor
+        return inch_to_ft(width_inch)
+    finally:
+        if measure_font is not None:
+            measure_font.Dispose()
+        g.Dispose()
+        bmp.Dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +121,6 @@ if view.ViewType not in allowed_view_types:
     )
 
 view_scale = view.Scale if view.Scale else 1
-output.print_md('**View scale:** 1:{}'.format(view_scale))
 
 # ---------------------------------------------------------------------------
 # 1. Read table data from clipboard
@@ -364,16 +376,6 @@ else:
 merged_count = sum(1 for c in placed_cells if c['rowspan'] > 1 or c['colspan'] > 1)
 align_count = sum(1 for c in placed_cells if c.get('align'))
 valign_count = sum(1 for c in placed_cells if c.get('valign'))
-output.print_md(
-    '**Detected table:** {} rows x {} columns | merged cells: {} | '
-    'Excel column widths: {} | Excel row heights: {} | '
-    'align detected: {} o | valign detected: {} o'.format(
-        n_rows, n_cols, merged_count,
-        'Yes' if col_widths_pt else 'No',
-        'Yes' if row_heights_pt else 'No',
-        align_count, valign_count
-    )
-)
 
 # ---------------------------------------------------------------------------
 # 2. Combined input dialog
@@ -428,8 +430,8 @@ class TableSetupForm(Form):
         self.StartPosition = FormStartPosition.CenterScreen
         self.FormBorderStyle = FormBorderStyle.Sizable
         self.AutoSize = False
-        self.ClientSize = Size(720, 460)
-        self.MinimumSize = Size(560, 330)
+        self.ClientSize = Size(560, 220)
+        self.MinimumSize = Size(480, 200)
         self.MaximizeBox = False
         self.MinimizeBox = False
         self.ShowInTaskbar = False
@@ -449,30 +451,9 @@ class TableSetupForm(Form):
         self.Controls.Add(layout)
         self.layout = layout
 
-        self._add_labeled_row(
-            'Fallback column width (in):',
-            self._make_textbox('1.0')
-        )
-        self.tb_width = self._last_control
-
-        self._add_labeled_row(
-            'Fallback row height (in):',
-            self._make_textbox('0.3')
-        )
-        self.tb_height = self._last_control
-
-        self._add_labeled_row(
-            'Size multiplier (x):',
-            self._make_textbox('1.0')
-        )
-        self.tb_multiplier = self._last_control
-
-        self._add_labeled_row(
-            'Cell padding (%):',
-            self._make_textbox('10')
-        )
-        self.tb_padding = self._last_control
-
+        # Fallback column/row size, size multiplier and cell padding are no
+        # longer user-editable: they use fixed defaults (see DEFAULT_* constants
+        # below) so the dialog only shows what actually needs a choice.
         line_style_combo = self._make_combo_box()
         for name in sorted(line_style_dict.keys()):
             line_style_combo.Items.Add(name)
@@ -561,41 +542,53 @@ result = setup_form.ShowDialog()
 if result != DialogResult.OK:
     script.exit()
 
-fallback_w_inch = setup_form.tb_width.Text
-fallback_h_inch = setup_form.tb_height.Text
-multiplier_text = setup_form.tb_multiplier.Text
-padding_text = setup_form.tb_padding.Text
 chosen_line_style_name = setup_form.cb_line_style.SelectedItem
 chosen_text_type_name = setup_form.cb_text_type.SelectedItem
 
-if (not fallback_w_inch or not fallback_h_inch or not multiplier_text or not padding_text
-        or not chosen_line_style_name or not chosen_text_type_name):
-    forms.alert('Missing input. Please fill in all fields.', exitscript=True)
+if not chosen_line_style_name or not chosen_text_type_name:
+    forms.alert('Missing input. Please select a line style and a Text Note Type.', exitscript=True)
 
-try:
-    fallback_w_inch = parse_user_float(
-        fallback_w_inch, 'Fallback column width', minimum=0.0, inclusive_min=False
-    )
-    fallback_h_inch = parse_user_float(
-        fallback_h_inch, 'Fallback row height', minimum=0.0, inclusive_min=False
-    )
-    size_multiplier = parse_user_float(
-        multiplier_text, 'Size multiplier', minimum=0.0, inclusive_min=False
-    )
-    padding_percent = parse_user_float(
-        padding_text, 'Cell padding', minimum=0.0, maximum=99.0
-    )
-except ValueError as input_error:
-    forms.alert('Invalid setup value:\n{}'.format(input_error), exitscript=True)
+# Fallback size / padding are fixed defaults; they only matter when a cell has
+# no Excel-detected width/height to begin with.
+fallback_w_inch = DEFAULT_FALLBACK_WIDTH_IN
+fallback_h_inch = DEFAULT_FALLBACK_HEIGHT_IN
+padding_percent = DEFAULT_PADDING_PERCENT
 
 pad_fraction = padding_percent / 100.0
 chosen_line_style = line_style_dict[chosen_line_style_name]
 chosen_text_type = text_type_dict[chosen_text_type_name]
 
-# TextNote.Create requires a valid width. Keep the note width within
-# Revit's allowed limits while matching the usable width of the cell.
 min_width_limit = TextNote.GetMinimumAllowedWidth(doc, chosen_text_type.Id)
 max_width_limit = TextNote.GetMaximumAllowedWidth(doc, chosen_text_type.Id)
+
+# font/size info of the chosen Text Note Type, needed to measure text width
+font_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_FONT)
+size_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_SIZE)
+bold_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_STYLE_BOLD)
+italic_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_STYLE_ITALIC)
+width_scale_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_WIDTH_SCALE)
+
+font_family_name = font_param.AsString() if font_param else 'Arial'
+text_size_ft = size_param.AsDouble() if size_param else inch_to_ft(3.0 / 32.0)
+point_size = text_size_ft * 12.0 * 72.0  # feet -> inch -> point
+
+# Size multiplier is no longer a manual input: it is derived from the chosen
+# Text Note Type's own "Text Size" parameter, relative to a 3/32" baseline.
+# e.g. a 1/4" Text Note Type gives a bigger multiplier than a 3/32" one, so the
+# table grid grows automatically to match the text size actually being used.
+text_size_in = text_size_ft * 12.0
+size_multiplier = (
+    text_size_in / BASE_TEXT_SIZE_IN if BASE_TEXT_SIZE_IN > 0 else 1.0
+)
+
+font_style = FontStyle.Regular
+if bold_param and bold_param.AsInteger() == 1:
+    font_style |= FontStyle.Bold
+if italic_param and italic_param.AsInteger() == 1:
+    font_style |= FontStyle.Italic
+
+width_factor = width_scale_param.AsDouble() if width_scale_param else 1.0
+SAFETY_MARGIN = 1.08  # small buffer so measured width isn't a tight fit
 
 # ---------------------------------------------------------------------------
 # 3. Pick insertion point (top-left corner of the table)
@@ -756,10 +749,30 @@ try:
         text_options.HorizontalAlignment = h_align
         text_options.VerticalAlignment = v_align
 
-        # TextNote width is stored in annotation/paper units. The grid
-        # already includes view.Scale, so divide by the view scale here.
-        desired_width = max((cell_width_ft - h_pad) / view_scale, 0.001)
-        safe_width = max(min_width_limit, min(desired_width, max_width_limit))
+        # IMPORTANT: TextNote.Width is an annotation-scale property - Revit
+        # automatically multiplies it by view.Scale internally (same
+        # mechanism as TextNoteType's Text Size) to compute the actual
+        # rendered box size. Since cell_width_ft already includes view_scale
+        # (needed to match the Detail Line grid), we must divide it back
+        # out here so Revit's own internal multiplication lands on the
+        # correct true (paper-space) width instead of double-scaling it.
+        desired_width_cell = max((cell_width_ft - h_pad) / view_scale, 0.001)
+
+        # measure how wide this text actually renders on ONE line, at the
+        # Text Note Type's real font/size; if that's wider than the cell,
+        # use it instead so the note stays single-line (overflowing past
+        # the cell, like Excel) rather than word-wrapping into 2+ lines
+        measured_width_ft = measure_text_width_ft(
+            content, font_family_name, point_size, font_style, width_factor
+        ) * SAFETY_MARGIN
+
+        desired_width = max(desired_width_cell, measured_width_ft)
+
+        safe_width = desired_width
+        if safe_width < min_width_limit:
+            safe_width = min_width_limit
+        elif safe_width > max_width_limit:
+            safe_width = max_width_limit
 
         TextNote.Create(
             doc, view.Id, XYZ(anchor_x, anchor_y, origin.Z),
@@ -767,7 +780,6 @@ try:
         )
 
     t.Commit()
-    output.print_md('**Done.** Table created: {} rows x {} columns.'.format(n_rows, n_cols))
 
 except Exception as ex:
     t.RollBack()

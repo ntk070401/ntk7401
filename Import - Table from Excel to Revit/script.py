@@ -14,16 +14,13 @@ view's drawing scale at creation time. (Note: this is a one-time
 scale-correct creation; if you change the view scale afterwards,
 the table will NOT auto-resize - you would need to recreate it.)
 
-TextNote width is measured against the actual rendered width of each
-cell's text (at the chosen Text Note Type's real font/size) so long
-text stays on one line (overflowing past the cell, like Excel) rather
-than wrapping into two lines just because the cell column is narrow.
+TextNote width is constrained to each cell's usable width. Long text
+may wrap inside the cell when it cannot fit on one line.
 
 Falls back to plain tab-separated text (uniform cell size, no merge,
 no alignment) if Excel HTML clipboard data is not available.
 
-Input values are validated before geometry creation, and unavailable fonts
-fall back to Arial for text-width measurement.
+Input values are validated before geometry creation.
 """
 __title__ = "Table\nExcel to Revit"
 
@@ -36,7 +33,7 @@ clr.AddReference('System')
 
 from System import IO
 from System.Net import WebUtility
-from System.Drawing import Point, Size, Font, FontStyle, GraphicsUnit, Bitmap, Graphics
+from System.Drawing import Point, Size, Font, FontStyle, GraphicsUnit
 from System.Windows.Forms import (
     Clipboard, Form, Label as WinLabel, TextBox as WinTextBox,
     ComboBox as WinComboBox, Button as WinButton, DialogResult,
@@ -93,63 +90,6 @@ def pt_to_ft(value_pt):
     """Convert a point (1/72 inch) value to Revit internal feet."""
     return inch_to_ft(value_pt * PT_TO_INCH)
 
-
-def measure_text_width_ft(text, font_family, point_size, font_style, width_factor):
-    """Estimate one-line rendered width in feet (paper-space).
-
-    If the selected font is unavailable on the machine, use Arial as a
-    conservative fallback instead of aborting table creation.
-    """
-    if not text:
-        return 0.0
-
-    bmp = Bitmap(1, 1)
-    g = Graphics.FromImage(bmp)
-    measure_font = None
-    try:
-        try:
-            measure_font = Font(font_family, point_size, font_style, GraphicsUnit.Point)
-        except Exception:
-            output.print_md(
-                '**WARNING:** Font "{}" is not available. Text width will be measured using Arial.'.format(
-                    font_family
-                )
-            )
-            measure_font = Font('Arial', point_size, font_style, GraphicsUnit.Point)
-
-        size = g.MeasureString(text, measure_font)
-        width_inch = (size.Width / g.DpiX) * width_factor
-        return inch_to_ft(width_inch)
-    finally:
-        if measure_font is not None:
-            measure_font.Dispose()
-        g.Dispose()
-        bmp.Dispose()
-
-
-
-def measure_text_height_ft(text, font_family, point_size, font_style):
-    """Estimate the rendered height of a Text Note in paper-space feet."""
-    if not text:
-        return 0.0
-
-    bmp = Bitmap(1, 1)
-    g = Graphics.FromImage(bmp)
-    measure_font = None
-    try:
-        try:
-            measure_font = Font(font_family, point_size, font_style, GraphicsUnit.Point)
-        except Exception:
-            measure_font = Font('Arial', point_size, font_style, GraphicsUnit.Point)
-
-        size = g.MeasureString(text, measure_font)
-        height_inch = size.Height / g.DpiY
-        return inch_to_ft(height_inch)
-    finally:
-        if measure_font is not None:
-            measure_font.Dispose()
-        g.Dispose()
-        bmp.Dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -652,31 +592,10 @@ pad_fraction = padding_percent / 100.0
 chosen_line_style = line_style_dict[chosen_line_style_name]
 chosen_text_type = text_type_dict[chosen_text_type_name]
 
+# TextNote.Create requires a valid width. Keep the note width within
+# Revit's allowed limits while matching the usable width of the cell.
 min_width_limit = TextNote.GetMinimumAllowedWidth(doc, chosen_text_type.Id)
 max_width_limit = TextNote.GetMaximumAllowedWidth(doc, chosen_text_type.Id)
-output.print_md(
-    '**Text width limit:** {:.4f} ft - {:.4f} ft'.format(min_width_limit, max_width_limit)
-)
-
-# font/size info of the chosen Text Note Type, needed to measure text width
-font_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_FONT)
-size_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_SIZE)
-bold_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_STYLE_BOLD)
-italic_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_STYLE_ITALIC)
-width_scale_param = chosen_text_type.get_Parameter(BuiltInParameter.TEXT_WIDTH_SCALE)
-
-font_family_name = font_param.AsString() if font_param else 'Arial'
-text_size_ft = size_param.AsDouble() if size_param else inch_to_ft(3.0 / 32.0)
-point_size = text_size_ft * 12.0 * 72.0  # feet -> inch -> point
-
-font_style = FontStyle.Regular
-if bold_param and bold_param.AsInteger() == 1:
-    font_style |= FontStyle.Bold
-if italic_param and italic_param.AsInteger() == 1:
-    font_style |= FontStyle.Italic
-
-width_factor = width_scale_param.AsDouble() if width_scale_param else 1.0
-SAFETY_MARGIN = 1.08  # small buffer so measured width isn't a tight fit
 
 # ---------------------------------------------------------------------------
 # 3. Pick insertion point (top-left corner of the table)
@@ -705,38 +624,6 @@ else:
 
 # add vertical breathing room so text doesn't touch top/bottom grid lines
 row_heights_ft = [h * (1.0 + pad_fraction) for h in row_heights_ft]
-
-# Ensure every row is tall enough for the selected Text Note Type.
-# Text measurement is in paper-space, so multiply by view_scale to compare
-# against Detail Line geometry in model-space.
-TEXT_HEIGHT_SAFETY_MARGIN = 1.15
-height_adjustment_count = 0
-for cell in placed_cells:
-    content = cell['text']
-    if not content or content.strip() == '':
-        continue
-
-    measured_height_ft = measure_text_height_ft(
-        content, font_family_name, point_size, font_style
-    ) * TEXT_HEIGHT_SAFETY_MARGIN
-    required_height_ft = measured_height_ft * view_scale * (1.0 + pad_fraction)
-
-    row_start = cell['row']
-    row_end = cell['row'] + cell['rowspan']
-    current_height_ft = sum(row_heights_ft[row_start:row_end])
-
-    if current_height_ft < required_height_ft:
-        # For a merged cell, add the extra height to its last row so the
-        # top edge remains stable while the complete cell can contain text.
-        row_heights_ft[row_end - 1] += required_height_ft - current_height_ft
-        height_adjustment_count += 1
-
-if height_adjustment_count:
-    output.print_md(
-        '**Automatic row height:** enlarged {} row/cell range(s) to fit the selected Text Note Type.'.format(
-            height_adjustment_count
-        )
-    )
 
 col_x = [origin.X]
 for w in col_widths_ft:
@@ -869,37 +756,10 @@ try:
         text_options.HorizontalAlignment = h_align
         text_options.VerticalAlignment = v_align
 
-        # IMPORTANT: TextNote.Width is an annotation-scale property - Revit
-        # automatically multiplies it by view.Scale internally (same
-        # mechanism as TextNoteType's Text Size) to compute the actual
-        # rendered box size. Since cell_width_ft already includes view_scale
-        # (needed to match the Detail Line grid), we must divide it back
-        # out here so Revit's own internal multiplication lands on the
-        # correct true (paper-space) width instead of double-scaling it.
-        desired_width_cell = max((cell_width_ft - h_pad) / view_scale, 0.001)
-
-        # measure how wide this text actually renders on ONE line, at the
-        # Text Note Type's real font/size; if that's wider than the cell,
-        # use it instead so the note stays single-line (overflowing past
-        # the cell, like Excel) rather than word-wrapping into 2+ lines
-        measured_width_ft = measure_text_width_ft(
-            content, font_family_name, point_size, font_style, width_factor
-        ) * SAFETY_MARGIN
-
-        desired_width = max(desired_width_cell, measured_width_ft)
-
-        safe_width = desired_width
-        if safe_width < min_width_limit:
-            safe_width = min_width_limit
-        elif safe_width > max_width_limit:
-            output.print_md(
-                '**WARNING:** Cell ({}, {}) text "{}" requires {:.4f} ft, '
-                'which exceeds the maximum width {:.4f} ft for the selected Text Note Type. '
-                'The text may wrap.'.format(
-                    r + 1, c + 1, content, safe_width, max_width_limit
-                )
-            )
-            safe_width = max_width_limit
+        # TextNote width is stored in annotation/paper units. The grid
+        # already includes view.Scale, so divide by the view scale here.
+        desired_width = max((cell_width_ft - h_pad) / view_scale, 0.001)
+        safe_width = max(min_width_limit, min(desired_width, max_width_limit))
 
         TextNote.Create(
             doc, view.Id, XYZ(anchor_x, anchor_y, origin.Z),

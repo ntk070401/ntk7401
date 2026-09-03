@@ -19,7 +19,7 @@ from pyrevit import revit, DB, forms, script
 doc = revit.doc
 output = script.get_output()
 
-DEFAULT_PARAM_NAME = "TT_SET"
+DEFAULT_PARAM_NAME = ""
 
 PARAM_NAME = forms.ask_for_string(
     default=DEFAULT_PARAM_NAME,

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 __title__ = "Sheet Numbering\nA of B"
 __doc__ = "Auto-number sheets (Sheet_Pos Index) and total count (Sheet_Amount), filtered by a user-defined parameter, grouped by TT_SHEET_TYPE, then sorted by Sheet Number"
 
@@ -171,9 +170,4 @@ output.print_md("- **Skipped (missing/read-only param):** {}".format(skipped_cou
 output.print_table(
     table_data=result_log,
     columns=[filter_param_name, "Sheet Number", "Pos Index", "Amount"]
-)
-
-forms.alert(
-    "Done!\nUpdated: {}\nSkipped: {}".format(updated_count, skipped_count),
-    title="Sheet Numbering"
 )

@@ -127,6 +127,31 @@ def measure_text_width_ft(text, font_family, point_size, font_style, width_facto
         bmp.Dispose()
 
 
+
+def measure_text_height_ft(text, font_family, point_size, font_style):
+    """Estimate the rendered height of a Text Note in paper-space feet."""
+    if not text:
+        return 0.0
+
+    bmp = Bitmap(1, 1)
+    g = Graphics.FromImage(bmp)
+    measure_font = None
+    try:
+        try:
+            measure_font = Font(font_family, point_size, font_style, GraphicsUnit.Point)
+        except Exception:
+            measure_font = Font('Arial', point_size, font_style, GraphicsUnit.Point)
+
+        size = g.MeasureString(text, measure_font)
+        height_inch = size.Height / g.DpiY
+        return inch_to_ft(height_inch)
+    finally:
+        if measure_font is not None:
+            measure_font.Dispose()
+        g.Dispose()
+        bmp.Dispose()
+
+
 # ---------------------------------------------------------------------------
 # 0. Validate active view
 # ---------------------------------------------------------------------------
@@ -680,6 +705,38 @@ else:
 
 # add vertical breathing room so text doesn't touch top/bottom grid lines
 row_heights_ft = [h * (1.0 + pad_fraction) for h in row_heights_ft]
+
+# Ensure every row is tall enough for the selected Text Note Type.
+# Text measurement is in paper-space, so multiply by view_scale to compare
+# against Detail Line geometry in model-space.
+TEXT_HEIGHT_SAFETY_MARGIN = 1.15
+height_adjustment_count = 0
+for cell in placed_cells:
+    content = cell['text']
+    if not content or content.strip() == '':
+        continue
+
+    measured_height_ft = measure_text_height_ft(
+        content, font_family_name, point_size, font_style
+    ) * TEXT_HEIGHT_SAFETY_MARGIN
+    required_height_ft = measured_height_ft * view_scale * (1.0 + pad_fraction)
+
+    row_start = cell['row']
+    row_end = cell['row'] + cell['rowspan']
+    current_height_ft = sum(row_heights_ft[row_start:row_end])
+
+    if current_height_ft < required_height_ft:
+        # For a merged cell, add the extra height to its last row so the
+        # top edge remains stable while the complete cell can contain text.
+        row_heights_ft[row_end - 1] += required_height_ft - current_height_ft
+        height_adjustment_count += 1
+
+if height_adjustment_count:
+    output.print_md(
+        '**Automatic row height:** enlarged {} row/cell range(s) to fit the selected Text Note Type.'.format(
+            height_adjustment_count
+        )
+    )
 
 col_x = [origin.X]
 for w in col_widths_ft:

@@ -1,0 +1,46 @@
+# ===== Revit =====
+*.rvt           # File Revit chính (nặng, nhị phân — không nên version control)
+*.rte
+*.rfa
+*.rft
+*.rvt.lock      # File khóa khi Revit đang mở
+*.0*.rvt        # File backup tự động của Revit (vd: Project.0001.rvt)
+Backup/         # Thư mục backup tự động Revit hay tạo cùng file .rvt
+Journal*.txt    # File journal log của Revit
+
+# ===== Dynamo =====
+*.dyn.bak
+*.dyf.bak
+
+# ===== pyRevit =====
+__pycache__/
+*.pyc
+*.pyd
+bin/            # Thư mục biên dịch của pyRevit extension (nếu có)
+*.egg-info/
+
+# ===== Python chung =====
+__pycache__/
+*.py[cod]
+*.egg
+*.egg-info/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+
+# ===== VS Code =====
+.vscode/
+*.code-workspace
+
+# ===== Windows / OS =====
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ===== Log / Temp =====
+*.log
+*.tmp
+*.temp
+~$*             # File tạm Office (Word/Excel) hay sinh ra khi mở file
